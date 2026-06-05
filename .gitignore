@@ -1,0 +1,16 @@
+# Replays and parser output (per CLAUDE.md)
+data/replays/
+data/extracted/
+
+# Generated DB — regenerable from seeds via `python -m sc2tc.db.build`
+data/sc2tc.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+build/
+dist/

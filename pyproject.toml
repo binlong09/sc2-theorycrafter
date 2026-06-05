@@ -1,0 +1,28 @@
+[project]
+name = "sc2-theorycrafter"
+version = "0.1.0"
+description = "Verified, patch-accurate StarCraft 2 theorycrafting assistant grounded in real game data."
+requires-python = ">=3.11"
+dependencies = [
+    # Phase 1 (data layer) intentionally has no heavy deps — pure stdlib (sqlite3, math).
+    # zephyrus-sc2-parser is installed as an editable sibling:
+    #   pip install -e ../zephyrus-sc2-parser
+    # It is intentionally NOT listed here so a fresh clone fails loudly if the sibling
+    # is missing, rather than silently pulling a stale version from PyPI.
+]
+
+[project.optional-dependencies]
+rag = ["chromadb"]
+api = ["fastapi", "uvicorn"]
+dev = ["pytest"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
