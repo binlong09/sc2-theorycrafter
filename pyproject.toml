@@ -14,6 +14,8 @@ dependencies = [
 [project.optional-dependencies]
 rag = ["chromadb"]
 api = ["fastapi", "uvicorn"]
+agent = ["anthropic"]   # Claude backend; the local Ollama backend uses stdlib urllib
+gamedata = ["burnysc2"] # engine extractor (extract_gamedata.py)
 dev = ["pytest"]
 
 [build-system]

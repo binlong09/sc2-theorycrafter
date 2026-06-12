@@ -5,6 +5,9 @@ data/extracted/
 # Generated DB — regenerable from seeds via `python -m sc2tc.db.build`
 data/sc2tc.db
 
+# Claude API key for the agent's claude backend (never commit secrets)
+.anthropic_key
+
 # Python
 __pycache__/
 *.py[cod]
