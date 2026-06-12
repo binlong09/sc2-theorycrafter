@@ -87,18 +87,26 @@ def breakpoint(attacker, defender, atk=0, armor=0, shield=0,
     if d is None:
         raise ValueError(f"No stats for defender '{defender}' @ {patch}. Build the DB / add the unit.")
 
-    # Resolve per-instance damage: base + weapon upgrade, plus vs-type bonus if it applies.
-    bonus_applies = bool(a["damage_bonus"]) and (
-        a["damage_bonus_type"].lower() in _armor_type_set(d)
-    )
-    instance_dmg = a["damage"] + a["weapon_upgrade_step"] * atk
+    # Pick the attacker's weapon by the defender's plane: anti-air weapon vs flyers,
+    # ground weapon otherwise.
+    flyer = bool(d["is_flyer"])
+    if flyer:
+        w_dmg, w_cnt = a["air_damage"], a["air_attack_count"]
+        w_bonus, w_btype = a["air_damage_bonus"], a["air_damage_bonus_type"]
+    else:
+        w_dmg, w_cnt = a["damage"], a["attack_count"]
+        w_bonus, w_btype = a["damage_bonus"], a["damage_bonus_type"]
+
+    bonus_applies = bool(w_bonus) and (w_btype.lower() in _armor_type_set(d))
+    instance_dmg = w_dmg + a["weapon_upgrade_step"] * atk
     if bonus_applies:
-        instance_dmg += a["damage_bonus"]
+        instance_dmg += w_bonus
 
     if instance_dmg <= 0:
-        raise ValueError(f"'{attacker}' has no ground attack (0 damage) — no breakpoint vs '{defender}'.")
+        plane = "air" if flyer else "ground"
+        raise ValueError(f"'{attacker}' has no {plane} attack — can't hit '{defender}'.")
 
-    attack_count = a["attack_count"]
+    attack_count = w_cnt
     eff_armor = d["armor"] + armor
     eff_shield_armor = d["shield_armor"] + shield
 

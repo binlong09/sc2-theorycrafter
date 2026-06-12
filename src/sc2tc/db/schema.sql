@@ -5,6 +5,10 @@
 -- patch-diff queries ("what changed for the zealot?") and era-scoped breakpoint
 -- tables possible without ever retraining anything.
 
+-- Full rebuild each time — the DB is regenerable from seeds/dumps, and dropping ensures
+-- schema changes (new columns) actually take effect.
+DROP TABLE IF EXISTS unit_stats;
+
 CREATE TABLE IF NOT EXISTS unit_stats (
     -- identity
     unit_name           TEXT    NOT NULL,
@@ -26,6 +30,19 @@ CREATE TABLE IF NOT EXISTS unit_stats (
     weapon_upgrade_step INTEGER NOT NULL DEFAULT 1, -- +dmg per instance per weapon-upgrade level
     attack_speed        REAL,                        -- seconds between attack cycles (game speed)
     range               REAL,
+
+    -- anti-air weapon (separate from ground; a "target_type=Any" weapon fills both)
+    air_damage          INTEGER NOT NULL DEFAULT 0,
+    air_attack_count    INTEGER NOT NULL DEFAULT 1,
+    air_damage_bonus    INTEGER NOT NULL DEFAULT 0,
+    air_damage_bonus_type TEXT  NOT NULL DEFAULT '',
+    air_attack_speed    REAL,
+    air_range           REAL,
+    is_flyer            INTEGER NOT NULL DEFAULT 0,   -- defender plane: 1 = attacked by anti-air
+
+    -- caster / vision (from engine dump)
+    energy_max          REAL,                        -- nullable: only casters have energy
+    sight_range         REAL,
 
     -- economy / production
     supply_cost         REAL,

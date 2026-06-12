@@ -53,7 +53,7 @@ ECON_5016 = EconConfig(
     vespene_geyser=2500,
     rich_vespene_harvest_return=6,
     command_center_supply=13,
-    nexus_supply=13,
+    nexus_supply=12,               # ENGINE-VERIFIED: Nexus=12, CC=13 (asymmetric! CLAUDE.md said both 13)
     hatchery_supply=4,             # 33% supply cut per hatch — big Zerg impact
     source="patch-notes-5.0.16-ptr",
 )

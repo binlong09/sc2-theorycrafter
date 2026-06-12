@@ -94,6 +94,40 @@ def test_ghost_rework_changes_damage_across_eras(conn):
 
 # --- Error handling -----------------------------------------------------------
 
+def test_attacker_uses_air_weapon_vs_flyer(conn):
+    # Queen's ground attack is 4x2, but a flying Overlord is hit by its air weapon (9x1).
+    bp = breakpoint("Queen", "Overlord", conn=conn)
+    assert bp.instance_damage == 9 and bp.attack_count == 1
+
+def test_ground_only_unit_cannot_hit_flyer(conn):
+    with pytest.raises(ValueError):
+        breakpoint("Zealot", "Phoenix", conn=conn)
+
+def test_air_attacker_vs_flyer(conn):
+    # Phoenix (5x2, +5 vs light) vs a Mutalisk (light): 20/cycle vs 120 hp -> 6 cycles.
+    assert breakpoint("Phoenix", "Mutalisk", conn=conn).cycles_to_kill == 6
+
+
+def test_sieged_tank_breakpoint(conn):
+    # Siege mode is a distinct row: 40 (+30 vs armored) = 70, -1 Roach armor = 69; 145hp -> 3.
+    bp = breakpoint("SiegeTankSieged", "Roach", conn=conn)
+    assert bp.instance_damage == 70 and bp.cycles_to_kill == 3
+    # and it works as a defender too (HP override = base tank's 175).
+    assert breakpoint("Marauder", "SiegeTankSieged", conn=conn).cycles_to_kill == 10
+
+
+def test_caster_energy_and_sight_stored(conn):
+    from sc2tc.db import get_unit
+    ht = get_unit(conn, "HighTemplar", "5.0.16-ptr")
+    assert ht["energy_max"] == 200 and ht["sight_range"] == 10
+    assert get_unit(conn, "Zealot", "5.0.16-ptr")["energy_max"] is None  # non-caster
+
+def test_oracle_has_curated_attack(conn):
+    # Oracle's Pulsar Beam (15) is a GM-flagged override — fits the auto-attack model.
+    bp = breakpoint("Oracle", "Drone", conn=conn)
+    assert bp.instance_damage == 15
+
+
 def test_no_attack_unit_raises(conn):
     with pytest.raises(ValueError):
         breakpoint("overlord", "zergling", conn=conn)
