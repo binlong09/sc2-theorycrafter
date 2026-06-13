@@ -152,7 +152,9 @@ _ACTIONS = {"MULE", "Inject", "Chrono", "Gas"}
 
 
 def simulate(build_order, race, patch_era="5.0.16-ptr", *,
-             rates=None, make_workers=True, macro=False, max_time_s=600.0, dt=1.0,
+             rates=None, make_workers=True, worker_priority=False, worker_cap=None,
+             auto_supply=False, auto_army=None, army_supply_cap=0.0, macro=False,
+             max_time_s=600.0, dt=1.0,
              sample_interval_s=5.0, starting_minerals=50, starting_gas=0):
     """Run a build order and return a TimingResult.
 
@@ -164,6 +166,26 @@ def simulate(build_order, race, patch_era="5.0.16-ptr", *,
         patch_era: era tag understood by patch_config (e.g. '5.0.16-ptr', '5.0.15').
         make_workers: if True (default), idle bases keep producing workers as long as
             doing so does not delay the next queued item. Set False to model worker cuts.
+        worker_priority: if True, workers are produced CONTINUOUSLY whenever a base is
+            free and supply allows — even if that delays the next queued building. This
+            models standard macro (workers never stop), where a single expensive building
+            waits a little rather than the whole worker line stalling. The default (False)
+            keeps the older "buildings first, workers fill non-delaying gaps" behavior,
+            which can starve worker production when the queue is a wall of expensive items.
+            The planner (planner.py) uses worker_priority=True for realistic full builds.
+        worker_cap: if set, stop auto-producing workers once total workers (mineral + gas)
+            reach this number — models mineral/gas SATURATION (a real player stops at ~2/
+            patch and makes army instead). Without it, worker_priority would make workers
+            forever over a long army-production table. None (default) = no cap (uncapped).
+        auto_supply: if True, the sim AUTO-BUILDS supply structures (Pylon/Depot/Overlord)
+            to stay ahead of supply blocks — so continuously-produced workers/army never
+            stall on supply. Margin scales with how many producers are spending supply.
+        auto_army: optional army COMPOSITION as [(unit_name, weight), ...]. When set, idle
+            production buildings continuously produce this comp (holding the ratio) up to
+            army_supply_cap — modeling "every Gateway/Barracks pumps as soon as it finishes,"
+            which a queued-at-the-end army can't. Army spends only what the explicit build
+            order and workers leave (tech/expansions keep priority).
+        army_supply_cap: stop auto_army once this much ARMY supply has been produced.
         macro: if True, auto-cast race macro mechanics from available energy — Protoss
             chronos in-progress production, Terran MULEs from each Orbital Command, Zerg
             injects from each Queen. Realistic econ; default False keeps a clean baseline.
@@ -175,8 +197,16 @@ def simulate(build_order, race, patch_era="5.0.16-ptr", *,
     # base + supply names per race
     base_name = {"Protoss": "Nexus", "Terran": "CommandCenter", "Zerg": "Hatchery"}[race]
     worker_name = {"Protoss": "Probe", "Terran": "SCV", "Zerg": "Drone"}[race]
+    supply_name = {"Protoss": "Pylon", "Terran": "SupplyDepot", "Zerg": "Overlord"}[race]
     base_supply = {"Protoss": econ.nexus_supply, "Terran": econ.command_center_supply,
                    "Zerg": econ.hatchery_supply}[race]
+
+    # auto_army: continuous production of a unit composition from idle production buildings,
+    # up to army_supply_cap (like make_workers, but for army). Resolve the items once.
+    army_spec = [(get_item(race, n), max(1, w)) for n, w in (auto_army or [])]
+    army_counts = {it.name: 0 for it, _ in army_spec}
+    army_supply_made = 0.0
+    supply_item = get_item(race, supply_name)
 
     # --- initial state -------------------------------------------------------
     t = 0.0
@@ -210,6 +240,7 @@ def simulate(build_order, race, patch_era="5.0.16-ptr", *,
     curve = []
     warnings = []
     notes = []
+    supply_blocked_seen = set()   # item names already warned as supply-blocked (dedupe)
     sample_at = 0.0
 
     def mineral_income_per_s():
@@ -502,22 +533,43 @@ def simulate(build_order, race, patch_era="5.0.16-ptr", *,
                 progressed = True
                 # auto-worker after committing the step (below) — recheck loop
             else:
-                # supply-blocked = could afford but capped on supply (not also mineral-short)
-                if "supply" in reasons and "resources" not in reasons:
-                    msg = (f"{TimingResult._fmt(t)} supply-blocked before {item.name} "
-                           f"({int(supply_used)}/{int(supply_cap)})")
-                    if msg not in warnings:
-                        warnings.append(msg)
+                # supply-blocked = could afford but capped on supply (not also mineral-short).
+                # Dedupe per item (don't spam one warning per tick while supply is on the way).
+                if "supply" in reasons and "resources" not in reasons and item.name not in supply_blocked_seen:
+                    supply_blocked_seen.add(item.name)
+                    warnings.append(f"{TimingResult._fmt(t)} supply-blocked before {item.name} "
+                                    f"({int(supply_used)}/{int(supply_cap)})")
                 break  # front not startable; wait (we hold resources for it)
+
+        # 2.5) auto-build supply to stay ahead of blocks (so continuous workers/army that
+        #      aren't in the explicit queue never stall on supply). Margin ~ the supply we'd
+        #      burn while a supply structure builds, scaled by how many producers spend it.
+        if auto_supply:
+            n_prod = sum(structures_base_count() if it.built_by == "larva"
+                         else structures[it.built_by] for it, _ in army_spec)
+            # Margin = supply we'd burn before a freshly-started supply structure finishes.
+            # Generous on purpose so we BANK supply ahead of the block — critical for Zerg,
+            # where an Overlord competes with drones/army for the same scarce larva and must
+            # win that race by being started early.
+            margin = max(3, 3 * (structures_base_count() + n_prod))
+            in_prog = sum(ev["item"].supply_provided for ev in pending
+                          if ev["item"].kind == "supply")
+            while (supply_cap + in_prog - supply_used) < margin and not blocked_reasons(supply_item):
+                start(supply_item)
+                in_prog += supply_item.supply_provided
+                progressed = True
 
         # 3) optional continuous worker production (doesn't delay the queued front item)
         if make_workers:
             wi = get_item(race, worker_name)
             while not blocked_reasons(wi):
+                if worker_cap is not None and mineral_workers + gas_workers >= worker_cap:
+                    break  # saturated — make army, not more workers
                 # Save (skip the worker) ONLY if the next queued item is ready except for
                 # minerals — i.e. building the worker would actually delay it. If the next
                 # item is also tech/supply/builder-gated, the worker doesn't delay it.
-                if queue and queue[0].split(":")[0] not in _ACTIONS:
+                # worker_priority bypasses this entirely: workers never stop for the queue.
+                if not worker_priority and queue and queue[0].split(":")[0] not in _ACTIONS:
                     nitem = get_item(race, queue[0])
                     purely_mineral_gated = not blocked_reasons(nitem, ignore_minerals=True)
                     short_after_worker = (minerals - wi.mineral_cost + 1e-9) < nitem.mineral_cost
@@ -525,6 +577,33 @@ def simulate(build_order, race, patch_era="5.0.16-ptr", *,
                         break
                 start(wi)
                 progressed = True
+
+        # 3.5) continuous army production from idle production buildings, holding the ratio,
+        #      up to army_supply_cap. Spends only what tech + workers leave this tick.
+        if army_spec and army_supply_made < army_supply_cap:
+            # Reserve money for a queued front item that's ONLY waiting on resources (e.g. an
+            # expansion) so army production doesn't starve the next planned building — a macro
+            # build finishes its queued Nexus/tech before dumping minerals into units.
+            m_reserve = g_reserve = 0.0
+            if queue and queue[0].split(":")[0] not in _ACTIONS:
+                front = get_item(race, queue[0])
+                if blocked_reasons(front) == ["resources"]:
+                    m_reserve, g_reserve = front.mineral_cost, front.gas_cost
+            while army_supply_made < army_supply_cap:
+                started_one = False
+                for it, w in sorted(army_spec, key=lambda iw: army_counts[iw[0].name] / iw[1]):
+                    if blocked_reasons(it):
+                        continue
+                    if minerals - it.mineral_cost < m_reserve - 1e-9 or \
+                            gas - it.gas_cost < g_reserve - 1e-9:
+                        continue  # would starve the resource-gated queue front — hold off
+                    start(it)
+                    army_counts[it.name] += 1
+                    army_supply_made += it.supply_cost or 1
+                    progressed = started_one = True
+                    break
+                if not started_one:
+                    break
 
         # 4) sample the curve
         if t >= sample_at - 1e-9:
@@ -537,8 +616,10 @@ def simulate(build_order, race, patch_era="5.0.16-ptr", *,
         minerals += mineral_income_per_s() * dt
         gas += gas_income_per_s() * dt
 
-        # termination: queue drained and nothing in progress
-        if not queue and not pending:
+        # termination: queue drained, nothing in progress, AND auto_army has met its cap
+        # (if army is just momentarily resource-blocked, keep going — income will accrue).
+        army_pending = bool(army_spec) and army_supply_made < army_supply_cap
+        if not queue and not pending and not army_pending:
             break
         stall_guard = 0 if progressed else stall_guard + 1
         if stall_guard > int(max_time_s / dt) + 2:

@@ -9,6 +9,7 @@ them to Claude (`input_schema`) and Ollama/OpenAI (`function.parameters`) shapes
 from ..db import connect, get_unit
 from ..calc.breakpoints import breakpoint as _breakpoint
 from ..calc.timing import simulate as _simulate
+from ..calc.planner import plan_build as _plan_build
 
 
 # --- tool implementations (each returns a short string) ----------------------
@@ -77,6 +78,42 @@ def simulate_build_order(build_order, race, patch_era="5.0.16-ptr", make_workers
     for w in r.warnings:
         lines.append(f"  ! {w}")
     return "\n".join(lines) if len(lines) > 1 else lines[0] + " (no notable steps)"
+
+
+def plan_build_order(race, units=None, upgrades=None, bases=1, patch_era="5.0.16-ptr",
+                     gas_per_base=None, production_per_base=None, production_total=None,
+                     army_supply=None):
+    """Design + time a COMPLETE build order from a goal, and render the full table.
+
+    Unlike simulate_build_order (which only times a list you write), this generates the
+    whole legal build — it auto-adds every tech prerequisite, gas, supply, the expansion(s),
+    per-race econ macro (Orbital/Queens), production buildings — then produces the army
+    composition continuously. Use it for 'give me a full build order that does X' requests.
+    `units` is a COMPOSITION RATIO (Name:weight), not a fixed count: the army streams in that
+    ratio and you read what's on the field at any timestamp off the table.
+    """
+    def _parse(entries):
+        out = []
+        for e in (entries or []):
+            name, sep, cnt = str(e).partition(":")
+            out.append((name.strip(), int(cnt)) if sep and cnt.strip().isdigit()
+                       else name.strip())
+        return out
+    kwargs = {}
+    if gas_per_base is not None:
+        kwargs["gas_per_base"] = int(gas_per_base)
+    if production_per_base is not None:
+        kwargs["production_per_base"] = int(production_per_base)
+    if production_total is not None:
+        kwargs["production_total"] = int(production_total)
+    if army_supply is not None:
+        kwargs["army_supply"] = int(army_supply)
+    try:
+        plan = _plan_build(race, units=_parse(units), upgrades=[str(u) for u in (upgrades or [])],
+                           bases=int(bases), patch_era=patch_era, **kwargs)
+    except Exception as e:
+        return f"ERROR: {e}"
+    return plan.table()
 
 
 def list_upgrades(race=None):
@@ -170,6 +207,51 @@ TOOLS = [
             "required": ["build_order", "race"],
         },
         "fn": simulate_build_order,
+    },
+    {
+        "name": "plan_build_order",
+        "description": "DESIGN a complete, playable build order from a high-level goal and "
+                       "return the full Supply | Time | Action | Cost | Notes table. Use this "
+                       "for ANY 'give me a (full) build order that does X / hits Y timing' "
+                       "request — NOT simulate_build_order (which only times a list you write "
+                       "by hand). This tool auto-includes every tech prerequisite, gas, supply, "
+                       "the expansion(s), per-race econ macro, production buildings, and the "
+                       "army, so you do NOT pre-compute the tech tree — just pass the goal. "
+                       "Units/upgrades accept friendly names ('muta', '+1 attack', 'charge').",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "race": {"type": "string", "enum": ["Protoss", "Terran", "Zerg"]},
+                "units": {"type": "array", "items": {"type": "string"},
+                          "description": "Army COMPOSITION as a ratio (Name:weight), NOT a fixed "
+                          "count. [\"Zealot:2\", \"HighTemplar:1\"] = a 2:1 zealot/templar army "
+                          "produced continuously; read the actual army at any time off the table. "
+                          "A bare name = weight 1. Friendly names ok ('muta', 'high templar')."},
+                "upgrades": {"type": "array", "items": {"type": "string"},
+                             "description": "Upgrades to research, e.g. [\"+1 attack\", \"charge\"]. "
+                             "Friendly names or engine names both work."},
+                "bases": {"type": "integer", "description": "Target number of bases (town halls): "
+                          "1 = one base, 2 = take a natural, etc.", "default": 1},
+                "gas_per_base": {"type": "integer", "description": "Geysers to take per base, "
+                                 "0-2 (a base physically has 2). Set from the BUILD TYPE: a "
+                                 "fast-expand/economic build = 1 (save minerals to expand); a "
+                                 "tech-heavy or all-in build = 2. Omit for the default (1)."},
+                "production_per_base": {"type": "integer", "description": "Army production "
+                                        "buildings (Gateway/Barracks) per base. Omit for the "
+                                        "race default (Protoss/Terran 4 -> 1-base=4-gate all-in; "
+                                        "Zerg 1). Raise for a heavier all-in."},
+                "production_total": {"type": "integer", "description": "TOTAL count of the main "
+                                     "production building — use this when the user names a "
+                                     "gate/rax count like '7-gate', '4-gate', '3-gate expand' "
+                                     "(set production_total=7/4/3). Overrides production_per_base."},
+                "army_supply": {"type": "integer", "description": "Army-supply ceiling to "
+                                "produce up to (bounds the table). Omit for the default "
+                                "(50 x bases, capped 200)."},
+                "patch_era": {"type": "string", "description": "Patch era tag", "default": "5.0.16-ptr"},
+            },
+            "required": ["race"],
+        },
+        "fn": plan_build_order,
     },
     {
         "name": "list_units",

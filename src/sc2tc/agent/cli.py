@@ -59,6 +59,12 @@ def _print(res, show_tools):
     if show_tools:
         for name, args, out in res.get("tool_calls", []):
             print(f"  - {name}({args}) -> {out.splitlines()[0][:100]}")
+    # Build tables are deterministic ground truth — show them VERBATIM straight from the
+    # tool rather than trust the model to reproduce a 100+ line table (it summarizes/
+    # hallucinates). The model's reply becomes a short takeaway under the real table.
+    for name, args, out in res.get("tool_calls", []):
+        if name == "plan_build_order" and not out.startswith("ERROR"):
+            print(out + "\n")
     print(f"{tag} {res['answer']}")
 
 
