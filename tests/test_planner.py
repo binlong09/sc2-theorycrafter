@@ -118,8 +118,57 @@ def test_gas_per_base_capped_at_physical_geyser_limit():
 
 
 def test_no_gas_structures_when_goal_is_mineral_only():
-    # Pure zealots need no gas -> never add geysers regardless of gas_per_base.
-    assert _geysers(plan_build("Protoss", units=["Zealot"], bases=2, gas_per_base=2)) == 0
+    # Pure zealots with warpgate OFF need no gas -> never add geysers.
+    assert _geysers(plan_build("Protoss", units=["Zealot"], bases=2, gas_per_base=2,
+                               warpgate=False)) == 0
+
+
+# --- warp gate (almost always needed; transforms cost 50/50 each) ------------
+
+def test_warpgate_research_and_transforms_added():
+    # Default warpgate=True: research it + morph EVERY gateway into a warp gate.
+    p = plan_build("Protoss", units=["Zealot"], upgrades=["charge"], bases=2, production_total=7)
+    assert "WarpGateResearch" in p.build_order
+    assert p.build_order.count("WarpGate") == p.build_order.count("Gateway") == 7
+
+
+def test_warpgate_forces_gas_even_for_pure_mineral_army():
+    # Research + transforms cost gas, so a warpgate build always takes a geyser.
+    assert _geysers(plan_build("Protoss", units=["Zealot"], bases=1)) >= 1
+
+
+def test_warpgate_can_be_disabled():
+    p = plan_build("Protoss", units=["Zealot"], bases=1, warpgate=False)
+    assert "WarpGate" not in p.build_order and "WarpGateResearch" not in p.build_order
+
+
+def test_warpgate_build_completes_no_stall():
+    p = plan_build("Protoss", units=["Zealot"], upgrades=["+1 attack"], bases=1)
+    assert not any("did not complete" in w or "stalled" in w for w in p.warnings)
+    assert p.result.complete_of("WarpGateResearch") is not None
+
+
+# --- build endpoint + closing note -------------------------------------------
+
+def test_build_done_marks_endpoint_and_closing_note():
+    p = plan_build("Protoss", units=["Zealot"], upgrades=["charge"], bases=2)
+    # endpoint = when the last planned building/transform/upgrade completes
+    planned = set(p.build_order)
+    last = max(s.complete_s for s in p.result.steps if s.name in planned)
+    assert abs(p.build_done_s - last) < 1e-6
+    assert "BUILD DONE" in p.closing and "warp" in p.closing.lower()
+
+
+def test_table_truncates_at_build_done():
+    # The rendered table stops at the build endpoint — no long streamed-army tail.
+    p = plan_build("Protoss", units=["Zealot"], upgrades=["charge"], bases=2)
+    table = p.table()
+    # last unit row in the table starts at/under build_done; the sim itself produced more
+    import re
+    times = [int(m[0]) * 60 + int(m[1])
+             for m in re.findall(r"^\d+\s+(\d+):(\d\d)\s", table, re.M)]
+    assert max(times) <= p.build_done_s / 1 + 2
+    assert p.result.finished_at > p.build_done_s   # sim ran past the rendered endpoint
 
 
 def test_production_per_base_race_default():

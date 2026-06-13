@@ -82,7 +82,7 @@ def simulate_build_order(build_order, race, patch_era="5.0.16-ptr", make_workers
 
 def plan_build_order(race, units=None, upgrades=None, bases=1, patch_era="5.0.16-ptr",
                      gas_per_base=None, production_per_base=None, production_total=None,
-                     army_supply=None):
+                     army_supply=None, warpgate=None):
     """Design + time a COMPLETE build order from a goal, and render the full table.
 
     Unlike simulate_build_order (which only times a list you write), this generates the
@@ -108,6 +108,8 @@ def plan_build_order(race, units=None, upgrades=None, bases=1, patch_era="5.0.16
         kwargs["production_total"] = int(production_total)
     if army_supply is not None:
         kwargs["army_supply"] = int(army_supply)
+    if warpgate is not None:
+        kwargs["warpgate"] = bool(warpgate)
     try:
         plan = _plan_build(race, units=_parse(units), upgrades=[str(u) for u in (upgrades or [])],
                            bases=int(bases), patch_era=patch_era, **kwargs)

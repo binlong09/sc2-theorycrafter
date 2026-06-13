@@ -181,6 +181,8 @@ class BuildPlan:
     build_order: list                 # the assembled step list fed to simulate()
     result: TimingResult
     notes: list = field(default_factory=list)   # planner-level notes (resolution, policy)
+    build_done_s: float = 0.0         # when the last PLANNED building/upgrade completes
+    closing: str = ""                 # tactical note shown under the table (warp-in etc.)
 
     @property
     def warnings(self):
@@ -188,12 +190,13 @@ class BuildPlan:
 
     def table(self):
         return render_table(self.result, self.race, self.patch_era,
-                            planner_notes=self.notes)
+                            planner_notes=self.notes, cutoff_s=self.build_done_s,
+                            closing=self.closing)
 
 
 def plan_build(race, units=None, upgrades=None, bases=1, patch_era="5.0.16-ptr",
                *, army_supply=None, production_per_base=None, production_total=None,
-               gas_per_base=1, max_time_s=1320.0):
+               gas_per_base=1, warpgate=True, max_time_s=1320.0):
     """Assemble + simulate a complete build order from a strategic goal.
 
     Args:
@@ -220,6 +223,9 @@ def plan_build(race, units=None, upgrades=None, bases=1, patch_era="5.0.16-ptr",
         gas_per_base: geysers per base when the goal needs gas. STRATEGIC — the caller sets
             it from the build type (fast-expand 1, tech/all-in 2). Default 1; HARD-CAPPED at
             MAX_GAS_PER_BASE (2 = the physical geyser count per base).
+        warpgate: Protoss only — research Warp Gate (almost always wanted) and morph every
+            Gateway into a Warp Gate (50/50 each in 5.0.16) so the build is warp-in-ready.
+            Default True. The build's endpoint becomes when the last of those completes.
 
     Returns a BuildPlan (carries the build_order, the TimingResult, and a .table()).
     """
@@ -262,6 +268,10 @@ def plan_build(race, units=None, upgrades=None, bases=1, patch_era="5.0.16-ptr",
 
     gas_needed = any(closure[n].gas_cost for n in closure) or any(
         catalog[n].gas_cost for n, _ in ratio)
+    # Warp Gate research + transforms cost gas, so a warpgate Protoss build needs a geyser
+    # even for an all-mineral (pure-zealot) army.
+    wg = warpgate and race == "Protoss" and "Gateway" in prod_buildings
+    gas_needed = gas_needed or wg
     gpb = max(0, min(MAX_GAS_PER_BASE, gas_per_base))   # cap at the 2-geyser physical limit
     ppb = production_per_base if production_per_base is not None else _default_production_per_base(race)
 
@@ -302,6 +312,19 @@ def plan_build(race, units=None, upgrades=None, bases=1, patch_era="5.0.16-ptr",
         bo += [pb] * max(0, total - 1)              # closure already placed one
     # upgrades (their research buildings are now in the order)
     bo += upgrade_names
+    # Warp Gate (Protoss, almost always): research it (after the Cyber) and morph EVERY
+    # Gateway into a Warp Gate (50/50 each in 5.0.16) so the build is warp-in-ready.
+    n_gates = bo.count("Gateway")
+    if warpgate and race == "Protoss" and n_gates and "WarpGate" in catalog:
+        if "CyberneticsCore" not in bo:        # warp gate research needs a Cyber
+            bo.insert(bo.index("Gateway") + 1, "CyberneticsCore")
+        # research needs the Cyber done AND gas — place it after BOTH (else it deadlocks
+        # waiting on gas that's queued behind it).
+        anchor = bo.index("CyberneticsCore")
+        if gas in bo:
+            anchor = max(anchor, bo.index(gas))
+        bo.insert(anchor + 1, "WarpGateResearch")
+        bo += ["WarpGate"] * n_gates
 
     # 4) simulate. The sim AUTO-BUILDS supply (no supply blocks) and pumps the army comp
     #    continuously from every idle production building up to the army-supply ceiling —
@@ -312,9 +335,42 @@ def plan_build(race, units=None, upgrades=None, bases=1, patch_era="5.0.16-ptr",
                       worker_cap=wcap, auto_supply=True, auto_army=ratio,
                       army_supply_cap=army_cap, macro=True, max_time_s=max_time_s)
 
+    # The build is "done" when the last PLANNED building/transform/upgrade completes — that's
+    # the point you stop teching and warp in to attack. (Auto-supply Pylons / streamed army /
+    # workers are NOT part of "the build", so they don't extend the endpoint.) The table is
+    # rendered up to here; the army you have by then is what you commit with.
+    planned = set(bo)
+    done_steps = [s for s in result.steps if s.name in planned]
+    build_done = max((s.complete_s for s in done_steps), default=result.finished_at)
+    closing = _closing_note(result, race, ratio, n_gates if warpgate else 0,
+                            build_done, upgrade_names, catalog)
+
     goal = {"composition": ratio, "army_supply": army_cap, "upgrades": upgrade_names, "bases": bases}
-    return BuildPlan(race=race, patch_era=patch_era, goal=goal,
-                     build_order=bo, result=result, notes=notes)
+    return BuildPlan(race=race, patch_era=patch_era, goal=goal, build_order=bo,
+                     result=result, notes=notes, build_done_s=build_done, closing=closing)
+
+
+def _closing_note(result, race, ratio, n_warpgates, build_done, upgrade_names, catalog):
+    """One-line tactical 'what now' shown under the table: the army on hand at the build's
+    completion + how to commit it (warp-in for Protoss)."""
+    f = lambda s: f"{int(s) // 60}:{int(s) % 60:02d}"
+    have = []
+    for name, _ in ratio:
+        n = sum(1 for s in result.steps if s.name == name and s.complete_s <= build_done + 1e-6)
+        if n:
+            have.append(f"{n} {name}")
+    army = ", ".join(have) if have else "your army"
+    ups = []
+    for u in upgrade_names:
+        c = result.complete_of(u)
+        if c is not None and c <= build_done + 1e-6:
+            ups.append(f"{REQUIREMENTS.get(u, ('', '', '', u))[3] or u} {f(c)}")
+    up_str = f" Upgrades: {', '.join(ups)}." if ups else ""
+    if race == "Protoss" and n_warpgates:
+        return (f"BUILD DONE {f(build_done)} — {n_warpgates} Warp Gates ready, {army} on hand."
+                f"{up_str} Put a proxy Pylon in a safe spot near the enemy and warp your army "
+                f"in to attack.")
+    return f"BUILD DONE {f(build_done)} — {army} on hand.{up_str} Move out and attack."
 
 
 # --------------------------------------------------------------------------- #
@@ -336,10 +392,12 @@ def _chrono_index(notes):
     return out
 
 
-def render_table(result, race, patch_era, planner_notes=None):
+def render_table(result, race, patch_era, planner_notes=None, cutoff_s=0.0, closing=""):
     """Render a TimingResult as the Supply | Time | Action | Cost | Notes table, with
     worker production and chrono-boost flags shown. Consecutive identical steps group
-    into 'Name xN'."""
+    into 'Name xN'. If cutoff_s > 0, only steps started by then are shown (the build's
+    endpoint — past it you're warping in/attacking, not building); `closing` is the
+    tactical 'what now' line printed under the table."""
     catalog = get_catalog(race)
     chronos = _chrono_index(result.notes)
 
@@ -352,6 +410,8 @@ def render_table(result, race, patch_era, planner_notes=None):
         return "/".join(parts) if parts else "—"
 
     steps = sorted(result.steps, key=lambda s: (s.start_s, s.name))
+    if cutoff_s > 0:
+        steps = [s for s in steps if s.start_s <= cutoff_s + 1e-6]
 
     # group consecutive identical names
     rows = []
@@ -389,6 +449,8 @@ def render_table(result, race, patch_era, planner_notes=None):
         lines.append(f"{sup:<{w_sup}}  {tm:<{w_time}}  {act:<{w_act}}  {cost:<{w_cost}}  {note}".rstrip())
 
     out = [f"{race} @ {patch_era} — start {result.starting_workers} workers", "", *lines]
+    if closing:
+        out += ["", closing]
     for n in (planner_notes or []):
         out.append(f"  · {n}")
     for w in result.warnings:
